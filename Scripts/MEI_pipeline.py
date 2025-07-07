@@ -33,7 +33,7 @@ device          = 'cuda'
 # Neural data & ROI
 roi_name        = 'face'                 # for output folder naming
 image_folder    = r"D:\Analysis\NSD_Alignment\NSD_shared1000"
-neural_path  = r"D:\Analysis\NeuroPredictor\Ephys_data_Face.npz"
+neural_path  = r"D:\Analysis\Ephys_data_Face.npz"
 save_dir      = rf"D:\Analysis\results\figures_{roi_name}_{backbone_type}"
 
 # Encoder (ridge) & PCA
@@ -158,6 +158,7 @@ def main():
     merged = np.load(neural_path)
     # concatenate only roi_name entries
     y = merged['data']
+    # According to BrainDiVE original setting
     y = standardize(y, axis=0)
     X = normalize(features, axis=1)
 

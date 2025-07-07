@@ -19,18 +19,24 @@ from NeuroPredictor.Encoder import Encoder
 from tqdm import tqdm
 
 
-# ==== User-defined settings (replace these with your own paths and parameters) ====
+# Model params
 backbone_type = 'clip'  # 'timm', 'torchvision', 'clip', or 'open_clip'
-model_name = 'RN50' # 
-layers_to_test = ['avgpool','layer1','layer2','layer3','layer4']
+model_name = 'RN50'
+layers_to_test = ['layer2','layer3','layer4']
 batch_size = 32
 use_amp = True
 device = 'cuda'
 
+# Encoding params
+cv_folds = 5
+pca_comps = 500     # set to None to disable PCA
+
+# Path setting
 save_dir = r"D:\Analysis\results\LayerSearch"
 image_folder = r"D:\Analysis\NSD_Alignment\NSD_shared1000"
-neural_path = r"D:\Analysis\NeuroPredictor\Ephys_data_59ver.npz"
-# ==============================================================================
+neural_path = r"D:\Analysis\Ephys_data_59ver.npz"
+
+# Utils
 def load_responses(path):
     """
     Load neural responses from a .npy or .npz file or CSV with numpy.
@@ -101,11 +107,9 @@ for layer in layers_to_test:
     # 对当前 layer 分批提取
     feat_batches = []
     for batch in tqdm(loader):
-        # 假设 loader 只返回图像张量
-        imgs_batch = batch.to(device)                   # 将这一批数据放到正确设备
+        imgs_batch = batch.to(device)                  
         with torch.no_grad():
-            feats_batch = extractor(imgs_batch, layer)  # (B, D) 或 {…}
-        # 如果 extractor 返回 dict，改为 feats_batch = feats_batch[layer]
+            feats_batch = extractor(imgs_batch, layer)  
         feat_batches.append(feats_batch.cpu())
 
     # 将所有 batch 拼接成 (N, D)
@@ -115,13 +119,11 @@ for layer in layers_to_test:
         feats_np = feats_all.numpy().reshape(feats_all.shape[0], -1)
     else:
         feats_np = feats_all.numpy()
-    print(feats_np.shape)
-    # 用 Encoder 做 5 折 CV PLS
-    enc = Encoder(method='Ridge', cv_folds=5, pca_comps=500)
+
+    enc = Encoder(method='Ridge', cv_folds=cv_folds, pca_comps=pca_comps)
     enc.fit(feats_np, y, nc)
     score = np.mean(enc.cv_r_)
     print(f"Layer {layer}: CV Pearson r = {score:.4f}")
-    # print(enc.best_params_, np.sum(enc.pca_.explained_variance_ratio_))
     scores.append(score)
 
 # 6. Find and report best layer
