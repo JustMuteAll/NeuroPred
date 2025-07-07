@@ -1,7 +1,30 @@
 # NeuroPred
 
 ## Environment Setup
-
+1. 创建conda环境
+```
+conda create -n neuropred python==3.10
+```
+2.确定当前设备的GPU cuda版本，去pytorch官网 https://pytorch.org/ 查找对应自己环境的pytorch下载命令。以Windows环境，CUDA版本为12.8对应的下载命令为例:
+```
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+```
+3.下载调用DNN所需的packages:timm, transformers, diffusers, open_clip, clip
+```
+pip install timm
+pip install transformers
+pip install diffusers
+pip install open_clip_torch
+```
+clip的下载直接使用"pip install clip" 有时会出现一些bug，通常我会使用: 
+```
+pip install git+https://github.com/openai/CLIP.git
+```
+4.下载一些辅助性的packages: matplotlib, scikit-learn
+```
+pip install matplotlib
+pip install scikit-learn
+```
 ## Usage of scripts
 一个标准的分析流程：激活 `NeuroPredictor` 环境，运行 `GetInfo.ipynb` 获取想要使用的网络及可调用的层；运行 `LayerSearch.py` 在指定模型和层列表中寻找最优编码层；运行 `MEI_pipeline.py` 在 BrainDiVE 框架下生成 MEI；运行 `MEI_review.ipynb` 对不同 Encoder 的 MEI 预测进行评估。运行代码所需的参数通常位于文件开头并附有注释。以下简要介绍各脚本的主要功能及所需文件。
 
