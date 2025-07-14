@@ -1,172 +1,368 @@
 import numpy as np
 from sklearn.cross_decomposition import PLSRegression
-from sklearn.linear_model import RidgeCV
-from sklearn.model_selection import GridSearchCV, KFold, cross_val_predict
+from sklearn.linear_model import Ridge, RidgeCV
+from sklearn.model_selection import GridSearchCV, KFold, cross_val_predict, cross_val_score
 from sklearn.decomposition import PCA
-from typing import Optional, List, Union
+from sklearn.multioutput import MultiOutputRegressor
+from typing import Optional, Union
+import warnings
+
+
+def _prepare_noise_ceiling(
+    noise_ceiling: Optional[Union[float, np.ndarray]],
+    r: Union[float, np.ndarray]
+) -> Optional[Union[float, np.ndarray]]:
+    """
+    Standardize and validate noise ceiling parameter shape.
+    """
+    if noise_ceiling is None:
+        return None
+    nc = np.asarray(noise_ceiling)
+    if nc.ndim == 0:
+        return float(nc)
+    if isinstance(r, np.ndarray) and nc.shape == r.shape:
+        return nc
+    raise ValueError(f"noise_ceiling shape {nc.shape} does not match r shape {r.shape}")
 
 
 def _pearson_r(
     y_true: np.ndarray,
     y_pred: np.ndarray,
-    noise_ceiling: Optional[np.ndarray] = None
+    noise_ceiling: Optional[Union[float, np.ndarray]] = None
 ) -> Union[float, np.ndarray]:
-    """
-    Compute Pearson correlation coefficient, with optional noise ceiling correction.
-
-    Args:
-      y_true:   np.ndarray of shape (T,) or (N, T)
-      y_pred:   np.ndarray of same shape as y_true
-      noise_ceiling: 
-        - None: no correction.
-        - scalar: correct all r by dividing by this scalar.
-        - 1D array of length N (when y_true is 2D): element-wise correction.
-
-    Returns:
-      float (if 1D inputs) or 1D np.ndarray of length N (if 2D inputs).
-    """
     if y_true.shape != y_pred.shape:
-        raise ValueError(f"Shapes must match, got {y_true.shape} vs {y_pred.shape}")
-
-    # 1D case
+        raise ValueError("Shapes must match")
     if y_true.ndim == 1:
         r = np.corrcoef(y_true, y_pred)[0, 1]
-
-    # 2D case: row-wise
-    elif y_true.ndim == 2:
-        yt = y_true - y_true.mean(axis=0, keepdims=True)
-        yp = y_pred - y_pred.mean(axis=0, keepdims=True)
-        num   = np.sum(yt * yp, axis=0)
-        denom = np.linalg.norm(yt, axis=0) * np.linalg.norm(yp, axis=0)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            r = num / denom
     else:
-        raise ValueError(f"Input arrays must be 1D or 2D, got ndim={y_true.ndim}")
+        yt = y_true - y_true.mean(axis=0)
+        yp = y_pred - y_pred.mean(axis=0)
+        r = (yt * yp).sum(axis=0) / (np.linalg.norm(yt, axis=0) * np.linalg.norm(yp, axis=0))
+    nc = _prepare_noise_ceiling(noise_ceiling, r)
+    return r / nc if nc is not None else r
 
-    # --- Noise ceiling correction ---
-    if noise_ceiling is not None:
-        nc = np.asarray(noise_ceiling)
-        # scalar case
-        if nc.ndim == 0:
-            r = r / float(nc)
-        # vector case: must match r's shape
-        else:
-            if r.ndim == 0:
-                raise ValueError(
-                    f"noise_ceiling must be scalar when y_true is 1D, got array of shape {nc.shape}"
-                )
-            if nc.shape != r.shape:
-                raise ValueError(
-                    f"noise_ceiling shape {nc.shape} does not match number of rows {r.shape}"
-                )
-            r = r / nc
 
-    return r
+def _explained_variance(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    noise_ceiling: Optional[Union[float, np.ndarray]] = None
+) -> Union[float, np.ndarray]:
+    if y_true.shape != y_pred.shape:
+        raise ValueError("Shapes must match")
+    if y_true.ndim == 1:
+        ss_res = ((y_true - y_pred) ** 2).sum()
+        ss_tot = ((y_true - y_true.mean()) ** 2).sum()
+        r2 = 1 - ss_res / ss_tot if ss_tot != 0 else 0.0
+    else:
+        ss_res = ((y_true - y_pred) ** 2).sum(axis=0)
+        ss_tot = ((y_true - y_true.mean(axis=0)) ** 2).sum(axis=0)
+        r2 = 1 - ss_res / ss_tot
+        r2 = np.where(ss_tot == 0, 0.0, r2)
+    nc = _prepare_noise_ceiling(noise_ceiling, r2)
+    return r2 / (nc ** 2) if nc is not None else r2
 
 
 class Encoder:
     def __init__(
         self,
         method: str = 'PLS',
-        pls_components: Optional[List[int]] = None,
-        ridge_alphas: Optional[List[float]] = None,
-        pca_comps: Optional[int] = None,
-        cv_folds: int = 5,
+        scoring: str = 'pearson',
+        components: Optional[list] = None,
+        pca_components: Optional[int] = None,
+        cv_splits: int = 5,
+        search_mode: str = 'whole',  # 'cv' or 'whole'
+        random_state: int = 42,
         n_jobs: int = -1,
-        random_state: int = 42
+        max_iter: int = 2000,
+        per_target: bool = False
     ):
         self.method = method.upper()
-        self.pls_components = pls_components if (pls_components is not None and len(pls_components) > 0) else [5, 10, 20, 50]
-        self.ridge_alphas  = ridge_alphas  if (ridge_alphas  is not None and len(ridge_alphas) > 0) else np.logspace(-5, 5, 11)
-        self.pca_comps     = pca_comps
-        self.cv_folds      = cv_folds
-        self.n_jobs        = n_jobs
-        self.random_state  = random_state
+        self.scoring = scoring.lower()
+        if self.scoring not in ['pearson', 'explained_variance']:
+            raise ValueError("scoring must be 'pearson' or 'explained_variance'")
+        if self.method == 'PLS':
+            self.components = components if (components is not None and len(components) > 0) else list(range(1, 31, 2))
+            self.alphas = None
+        else:
+            self.alphas = components if (components is not None and len(components) > 0) else np.logspace(-2, 6, 9).tolist()
+            self.components = None
+        self.pca_components = pca_components
+        self.cv = KFold(n_splits=cv_splits, shuffle=True, random_state=random_state)
+        self.search_mode = search_mode
+        self.random_state = random_state
+        self.n_jobs = n_jobs
+        self.max_iter = max_iter
+        self.per_target = per_target
 
-        # PCA attributes (set in fit)
+        # placeholders
         self.pca_: Optional[PCA] = None
-        self.pca_components_: Optional[np.ndarray] = None
-
-        # Fitted model attributes
+        self.model_ = None
         self.best_params_ = {}
-        self.model_       = None
-        self.coef_        = None
-        self.intercept_   = None
-        self.cv_pred_     = None
-        self.cv_r_        = None
+        self.cv_pred_ = None
+        self.coef_ = None
+        self.intercept_ = None
+        self.best_per_target_ = None
+        self.best_scores_ = None
 
-    def _make_cv(self):
-        return KFold(
-            n_splits=self.cv_folds,
-            shuffle=True,
-            random_state=self.random_state
-        )
+    def _scorer(self):
+        if self.scoring == 'pearson':
+            return _pearson_r
+        elif self.scoring in ['explained_variance_custom', 'explained_variance']:
+            return _explained_variance
+        else:
+            # For string scoring methods, return the string itself
+            return self.scoring
+    
+    def _get_cv_scoring(self):
+        """Return the appropriate scoring parameter for GridSearchCV."""
+        scoring_func = self._scorer()
+        
+        # If it's a callable (custom function), wrap it in lambda
+        if callable(scoring_func):
+            return lambda est, X_, y_: scoring_func(y_, est.predict(X_)).mean()
+        # If it's a string, return as-is for sklearn's built-in scoring
+        else:
+            return scoring_func
+    
+    def _hyperparam_selection_whole_dataset(self, X: np.ndarray, y: np.ndarray, noise_ceiling=None):
+        """
+        Improved: Select hyperparameters by evaluating with CV only,
+        do NOT fit on whole dataset inside loop. Final model is fit once at the end.
+        """
+        scoring_func = self._scorer()
+        cv = self.cv
+        best_score = -np.inf
+        best_params = None
+        best_param_value = None  # hold the best hyperparameter value
+        
+        if self.method == 'PLS':
+            print(f"Testing {len(self.components)} PLS components (evaluate with CV)...")
+            for n_comp in self.components:
+                n_comp_clamped = min(n_comp, min(X.shape[0], X.shape[1]) - 1)
+                pls_model = PLSRegression(n_components=n_comp_clamped, max_iter=self.max_iter)
+                cv_pred = cross_val_predict(pls_model, X, y, cv=cv, n_jobs=self.n_jobs)
+                score = scoring_func(y, cv_pred, noise_ceiling)
+                score_mean = score.mean() if hasattr(score, 'mean') else score
+                # print(f"PLS n_components={n_comp_clamped} score={score_mean:.4f}")
+                if score_mean > best_score:
+                    best_score = score_mean
+                    best_params = {'n_components': n_comp_clamped}
+                    best_param_value = n_comp_clamped
 
-    def fit(self, X: np.ndarray, y: np.ndarray, noise_ceiling=None) -> None:
+            # Build final best model and fit on whole data
+            best_model = PLSRegression(n_components=best_param_value, max_iter=self.max_iter)
+            best_model.fit(X, y)
+        
+        elif self.method == 'RIDGE':
+            print(f"Testing {len(self.alphas)} Ridge alphas (evaluate with CV)...")
+            for alpha in self.alphas:
+                ridge_model = Ridge(alpha=alpha, fit_intercept=True)
+                cv_pred = cross_val_predict(ridge_model, X, y, cv=cv, n_jobs=self.n_jobs)
+                score = scoring_func(y, cv_pred, noise_ceiling)
+                score_mean = score.mean() if hasattr(score, 'mean') else score
+                # print(f"Ridge alpha={alpha} score={score_mean:.4f}")
+                if score_mean > best_score:
+                    best_score = score_mean
+                    best_params = {'alpha': alpha}
+                    best_param_value = alpha
+
+            best_model = Ridge(alpha=best_param_value, fit_intercept=True)
+            best_model.fit(X, y)
+
+        else:
+            raise ValueError(f"Unsupported method: {self.method}")
+        
+        return best_model, best_params, best_score
+
+    def _evaluate_with_cv_average(self, model, X: np.ndarray, y: np.ndarray, noise_ceiling=None):
+        """
+        NEW: Evaluate model using CV average (like GridSearchCV does).
+        """
+        scoring_func = self._scorer()
+        cv = self.cv
+        scores = np.zeros(y.shape[1])
+        for train_idx, val_idx in cv.split(X, y):
+            X_train, X_val = X[train_idx], X[val_idx]
+            y_train, y_val = y[train_idx], y[val_idx]
+            
+            # Clone and fit model on training fold
+            if self.method == 'PLS':
+                fold_model = PLSRegression(n_components=model.n_components, max_iter=self.max_iter)
+            elif self.method == 'RIDGE':
+                fold_model = Ridge(alpha=model.alpha, fit_intercept=True)
+            else:
+                raise ValueError(f"Unsupported method: {self.method}")
+            
+            fold_model.fit(X_train, y_train)
+            y_pred = fold_model.predict(X_val)
+            
+            fold_score = scoring_func(y_val, y_pred, noise_ceiling)
+            fold_score = np.atleast_1d(fold_score)
+            scores += fold_score
+        scores /= self.cv.get_n_splits()
+        return scores
+
+    def fit(
+        self, X: np.ndarray, y: np.ndarray, noise_ceiling=None
+    ) -> None:
         """
         1) Optional PCA on X
-        2) Hyperparameter search (PLS or Ridge)
+        2) Hyperparameter search (PLS or Ridge, with optional per-target)
         3) Cross-val predict & score
         4) Final fit on full data
         """
-        # --- PCA Step ---
-        if self.pca_comps is not None:
-            self.pca_ = PCA(n_components=self.pca_comps, random_state=self.random_state)
+        # Optional PCA
+        if self.pca_components is not None:
+            self.pca_ = PCA(n_components=self.pca_components, random_state=self.random_state)
             X = self.pca_.fit_transform(X)
             self.pca_components_ = self.pca_.components_
 
-        # --- Model & Search Setup ---
-        if self.method == 'PLS':
-            base = PLSRegression()
-            param_grid = {'n_components': self.pls_components}
-            search = GridSearchCV(
-                estimator=base,
-                param_grid=param_grid,
-                cv=self._make_cv(),
-                scoring=lambda est, X_, y_: _pearson_r(
-                    y_, est.predict(X_)).mean(),
-                n_jobs=self.n_jobs
-            )
-        elif self.method == 'RIDGE':
-            search = RidgeCV(
-                alphas=self.ridge_alphas,
-                cv=self._make_cv(),
-                scoring=None,
-                store_cv_results=False
-            )
-        else:
-            raise ValueError(f"Unsupported method: {self.method}")
+        # Get scoring functions
+        scoring_func = _pearson_r if self.scoring == 'pearson' else _explained_variance
+        cv_scoring = self._get_cv_scoring()
 
-        # --- Hyperparameter Search ---
-        search.fit(X, y)
-        if self.method == 'PLS':
+        # Per-target branch
+        if self.per_target and y.ndim == 2:
+            if self.method == 'PLS':
+                return self._fit_pls_per_target(X, y, noise_ceiling)
+            else:
+                return self._fit_ridge_per_target(X, y, noise_ceiling)
+
+        # Hyperparameter selection
+        if self.search_mode == 'whole':
+            best_est, self.best_params_, score = self._hyperparam_selection_whole_dataset(
+                X, y, noise_ceiling
+            )
+        elif self.search_mode == 'cv':
+            if self.method == 'PLS':
+                search = GridSearchCV(
+                    PLSRegression(max_iter=self.max_iter),
+                    {'n_components': self.components},
+                    cv=self.cv,
+                    scoring=cv_scoring,
+                    n_jobs=self.n_jobs
+                )
+            else:
+                search = GridSearchCV(
+                    Ridge(),
+                    {'alpha': self.alphas},
+                    cv=self.cv,
+                    scoring=cv_scoring,
+                    n_jobs=self.n_jobs
+                )
+            search.fit(X, y)
             best_est = search.best_estimator_
             self.best_params_ = search.best_params_
-        else:
-            best_est = search
-            self.best_params_ = {'alpha': float(search.alpha_)}
-
-        # --- Cross-val Predict and Score ---
+         
+        # Evaluation
         self.cv_pred_ = cross_val_predict(
-            best_est, X, y,
-            cv=self._make_cv(),
-            n_jobs=self.n_jobs
-        )
-        self.cv_r_ = _pearson_r(y, self.cv_pred_, noise_ceiling)
+                best_est, X, y, cv=self.cv, n_jobs=self.n_jobs
+            )
+        if self.search_mode == 'cv':
+            self.best_scores_ = self._evaluate_with_cv_average(
+                best_est, X, y, noise_ceiling
+            )
+        elif self.search_mode == 'whole':
+            self.best_scores_ = scoring_func(y, self.cv_pred_, noise_ceiling)
 
-        # --- Final Fit on Full Data ---
+        # Final full-data fit
         self.model_ = best_est
         self.model_.fit(X, y)
-        self.coef_      = getattr(self.model_, 'coef_', None)
+        self.coef_ = getattr(self.model_, 'coef_', None)
         self.intercept_ = getattr(self.model_, 'intercept_', None)
 
-    def predict(self, X: np.ndarray) -> np.ndarray:
+    def _fit_ridge_per_target(
+        self, X: np.ndarray, y: np.ndarray, noise_ceiling=None
+    ):
+        best_scores, best_alphas = None, None
+        
+        for alpha in self.alphas:
+            model = Ridge(alpha=alpha)
+            if self.search_mode == 'whole':
+                preds = cross_val_predict(
+                    model, X, y, cv=self.cv, n_jobs=self.n_jobs
+                )
+                scores = (_pearson_r if self.scoring == 'pearson' else _explained_variance)(
+                    y, preds, noise_ceiling
+                )
+            elif self.search_mode == 'cv':
+                scores = self._evaluate_with_cv_average(model, X, y, noise_ceiling)
+            scores = np.atleast_1d(scores)
+            if best_scores is None:
+                best_scores, best_alphas = scores.copy(), np.full(scores.shape, alpha)
+            else:
+                mask = scores > best_scores
+                best_scores[mask] = scores[mask]
+                best_alphas[mask] = alpha
+                
+        self.best_per_target_, self.best_scores_ = best_alphas, best_scores
+        coefs, inters = [], []
+        for i, alpha in enumerate(best_alphas):
+            m = Ridge(alpha=alpha).fit(X, y[:, i])
+            coefs.append(m.coef_)
+            inters.append(m.intercept_)
+        self.coef_ = np.vstack(coefs)
+        self.intercept_ = np.array(inters)
+        mor = MultiOutputRegressor(Ridge(), n_jobs=self.n_jobs)
+        mor.estimators_ = [Ridge(alpha=a) for a in best_alphas]
+        self.model_ = mor
+
+    def _fit_pls_per_target(
+        self, X: np.ndarray, y: np.ndarray, noise_ceiling=None
+    ):
+        best_scores, best_comps = None, None
+        for comp in self.components:
+            model = PLSRegression(n_components=comp, max_iter=self.max_iter)
+            if self.search_mode == 'whole':
+                preds = cross_val_predict(
+                    model, X, y, cv=self.cv, n_jobs=self.n_jobs
+                )
+                scores = (_pearson_r if self.scoring == 'pearson' else _explained_variance)(
+                    y, preds, noise_ceiling
+                )
+            elif self.search_mode == 'cv':
+                scores = self._evaluate_with_cv_average(model, X, y, noise_ceiling)
+            scores = np.atleast_1d(scores)
+            if best_scores is None:
+                best_scores, best_comps = scores.copy(), np.full(scores.shape, comp)
+            else:
+                mask = scores > best_scores
+                best_scores[mask] = scores[mask]
+                best_comps[mask] = comp
+        self.best_per_target_, self.best_scores_ = best_comps, best_scores
+        coefs, inters = [], []
+        for i, comp in enumerate(best_comps):
+            m = PLSRegression(n_components=comp, max_iter=self.max_iter).fit(X, y[:, i])
+            coefs.append(m.coef_.flatten())
+            inters.append(m._y_mean)
+        self.coef_ = np.vstack(coefs)
+        self.intercept_ = np.array(inters)
+        mor = MultiOutputRegressor(PLSRegression(), n_jobs=self.n_jobs)
+        mor.estimators_ = [PLSRegression(n_components=c, max_iter=self.max_iter) for c in best_comps]
+        self.model_ = mor
+
+    def predict(
+        self, X: np.ndarray
+    ) -> np.ndarray:
         if self.model_ is None:
-            raise RuntimeError("Model is not fitted. Call .fit() first.")
+            raise RuntimeError("Model not fitted")
         if self.pca_ is not None:
             X = self.pca_.transform(X)
         return self.model_.predict(X)
 
-    def score(self, X: np.ndarray, y: np.ndarray, noise_ceiling=None) -> float:
+    def score(
+        self, X: np.ndarray, y: np.ndarray, noise_ceiling=None
+    ) -> Union[float, np.ndarray]:
         y_pred = self.predict(X)
-        return _pearson_r(y, y_pred, noise_ceiling)
+        fn = _pearson_r if self.scoring == 'pearson' else _explained_variance
+        return fn(y, y_pred, noise_ceiling)
+
+    def get_results(self) -> dict:
+        return {
+            'best_params': self.best_params_,
+            'best_per_target': self.best_per_target_,
+            'best_scores': self.best_scores_,
+            'cv_score': self.cv_score_,
+            'scoring': self.scoring,
+            'method': self.method
+        }
