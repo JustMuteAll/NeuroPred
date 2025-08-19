@@ -4,6 +4,7 @@
 1. 创建conda环境
 ```
 conda create -n neuropred python==3.10
+conda activate neuropred
 ```
 2.确定当前设备的GPU cuda版本，去pytorch官网 https://pytorch.org/ 查找对应自己环境的pytorch下载命令。以Windows环境，CUDA版本为12.8对应的下载命令为例:
 ```
