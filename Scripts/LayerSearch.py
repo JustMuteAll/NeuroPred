@@ -20,8 +20,9 @@ from tqdm import tqdm
 
 
 # Model params
-backbone_type = 'clip'  # 'timm', 'torchvision', 'clip', or 'open_clip'
-model_name = 'RN50'
+backbone_type = 'torchvision'  # 'timm', 'torchvision', 'clip', or 'open_clip'
+model_name = 'resnet50'
+ckpt_path = r"D:\Dataset\ss_weights\resnet50\dino_resnet50_pretrain.pth"
 layers_to_test = ['layer2','layer3','layer4']
 batch_size = 32
 use_amp = True
@@ -69,7 +70,7 @@ def get_extractor(backbone_type, model_name, device, amp):
     if backbone_type == 'timm':
         return TimmFeatureExtractor(model_name, pretrained=True, device=device, amp=amp)
     if backbone_type == 'torchvision':
-        return TorchvisionFeatureExtractor(model_name, pretrained=True, device=device, amp=amp)
+        return TorchvisionFeatureExtractor(model_name, ckpt_path=ckpt_path, device=device, amp=amp)
     if backbone_type == 'clip':
         return CLIPFeatureExtractor(model_name, device=device, amp=amp)
     if backbone_type == 'open_clip':
@@ -86,20 +87,20 @@ default_preprocess = transforms.Compose([
         ])
 
 # ---- Main processing ----
-# 1. Load neural responses
+# Load neural responses
 data = np.load(neural_path)
 y, nc = data['data'], data['nc']
 print(y.shape, nc.shape)
 
-# 2. Initialize feature extractor
+# Initialize feature extractor
 extractor = get_extractor(backbone_type, model_name, device, use_amp)
 preprocess = extractor.get_preprocess() or default_preprocess
 
-# 3. Prepare image dataset and loader
+# Prepare image dataset and loader
 dataset = ImageFolderDataset(image_folder, transform=preprocess)
 loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
-# 4–5. 按 layer 分批提取特征并拼接，然后训练 Encoder
+# 按 layer 分批提取特征并拼接，然后训练 Encoder
 scores = []
 for layer in layers_to_test:
     print(f"Processing layer: {layer}")
@@ -120,19 +121,24 @@ for layer in layers_to_test:
     else:
         feats_np = feats_all.numpy()
 
-    enc = Encoder(method='Ridge', cv_folds=cv_folds, pca_comps=pca_comps)
-    enc.fit(feats_np, y, nc)
-    score = np.mean(enc.cv_r_)
+    enc = Encoder(method='Ridge', cv_splits=cv_folds, pca_components=pca_comps)
+    cv_mode = 'nested' # 'simple' or 'nested'
+    if cv_mode == 'simple':
+        enc.fit(feats_np, y, nc)
+        score = np.mean(enc.best_scores_)
+    elif cv_mode == 'nested':
+        _, best_score = enc.fit_nested_cv(feats_np, y, nc)
+        score = np.mean(best_score)
     print(f"Layer {layer}: CV Pearson r = {score:.4f}")
     scores.append(score)
 
-# 6. Find and report best layer
+# Find and report best layer
 best_idx = int(np.argmax(scores))
 best_layer = layers_to_test[best_idx]
 best_score = scores[best_idx]
 print(f"\nBest layer: {best_layer} with CV Pearson r = {best_score:.4f}")
 
-# 7. Plot results
+# Plot results
 save_path = os.path.join(save_dir, model_name+"-"+best_layer+".png")
 plt.figure()
 plt.plot(layers_to_test, scores, marker='o')

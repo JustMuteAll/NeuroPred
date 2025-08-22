@@ -90,6 +90,7 @@ class FeatureExtractorBase(nn.Module):
         """
         # Create dummy image: batch_size=1, 3-channel RGB
         dummy = torch.randn(1, 3, image_size, image_size).to(self.device)
+        print(type(dummy))
 
         # Register hooks and run forward
         self._features = {}
@@ -205,12 +206,42 @@ class TimmFeatureExtractor(FeatureExtractorBase):
             return self._extract_features(x, layer_or_names)
 
 class TorchvisionFeatureExtractor(FeatureExtractorBase):
-    def __init__(self, model_name: str = 'resnet50', pretrained=True, device='cuda', amp=True):
+    def __init__(self, model_name: str = 'resnet50', ckpt_path=False, device='cuda', amp=True):
         super().__init__(device, amp)
         if hasattr(tv_models, model_name):
-            self.model = getattr(tv_models, model_name)(pretrained=pretrained).to(self.device).eval()
+            if not ckpt_path:
+                self.model = getattr(tv_models, model_name)(pretrained=True).to(self.device).eval()
+            else:
+                self.model = getattr(tv_models, model_name)(weights=None).to(self.device).eval()
+                ckpt = torch.load(ckpt_path, map_location="cpu")
+
+                if isinstance(ckpt, dict):
+                    # 尝试常见键名
+                    if "state_dict" in ckpt:
+                        sd = ckpt["state_dict"]
+                    elif "model_state_dict" in ckpt:
+                        sd = ckpt["model_state_dict"]
+                    elif "model" in ckpt and isinstance(ckpt["model"], dict):
+                        sd = ckpt["model"]
+                    else:
+                        # 否则假设整个对象就是 state_dict
+                        sd = ckpt
+                else:
+                    sd = ckpt
+
+                new_sd = {}
+                for k, v in sd.items():
+                    new_k = k
+                    if k.startswith("module."):
+                        new_k = k[len("module."):]
+                    if new_k.startswith("model."):
+                        new_k = new_k[len("model."):]
+                    new_sd[new_k] = v
+                missing, unexpected = self.model.load_state_dict(new_sd, strict=False)
+                
         else:
             raise ValueError(f"Unknown torchvision model {model_name}")
+        
         for p in self.model.parameters(): p.requires_grad = False
         try:
             weights = tv_models.get_model_weights(model_name).DEFAULT

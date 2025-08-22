@@ -7,6 +7,8 @@ from sklearn.multioutput import MultiOutputRegressor
 from typing import Optional, Union
 import warnings
 
+import test
+
 
 def _prepare_noise_ceiling(
     noise_ceiling: Optional[Union[float, np.ndarray]],
@@ -68,9 +70,10 @@ class Encoder:
         method: str = 'PLS',
         scoring: str = 'pearson',
         components: Optional[list] = None,
+        alphas: Optional[list] = None,
         pca_components: Optional[int] = None,
         cv_splits: int = 5,
-        search_mode: str = 'whole',  # 'cv' or 'whole'
+        eval_method: str = 'whole',  # 'cv' or 'whole'
         random_state: int = 42,
         n_jobs: int = -1,
         max_iter: int = 2000,
@@ -84,11 +87,12 @@ class Encoder:
             self.components = components if (components is not None and len(components) > 0) else list(range(1, 31, 2))
             self.alphas = None
         else:
-            self.alphas = components if (components is not None and len(components) > 0) else np.logspace(-2, 6, 9).tolist()
+            self.alphas = alphas if (alphas is not None and len(alphas) > 0) else np.logspace(-2, 6, 9).tolist()
             self.components = None
         self.pca_components = pca_components
+        self.cv_splits = cv_splits
         self.cv = KFold(n_splits=cv_splits, shuffle=True, random_state=random_state)
-        self.search_mode = search_mode
+        self.eval_method = eval_method
         self.random_state = random_state
         self.n_jobs = n_jobs
         self.max_iter = max_iter
@@ -229,11 +233,11 @@ class Encoder:
                 return self._fit_ridge_per_target(X, y, noise_ceiling)
 
         # Hyperparameter selection
-        if self.search_mode == 'whole':
+        if self.eval_method == 'whole':
             best_est, self.best_params_, score = self._hyperparam_selection_whole_dataset(
                 X, y, noise_ceiling
             )
-        elif self.search_mode == 'cv':
+        elif self.eval_method == 'cv':
             if self.method == 'PLS':
                 search = GridSearchCV(
                     PLSRegression(max_iter=self.max_iter),
@@ -258,11 +262,11 @@ class Encoder:
         self.cv_pred_ = cross_val_predict(
                 best_est, X, y, cv=self.cv, n_jobs=self.n_jobs
             )
-        if self.search_mode == 'cv':
+        if self.eval_method == 'cv':
             self.best_scores_ = self._evaluate_with_cv_average(
                 best_est, X, y, noise_ceiling
             )
-        elif self.search_mode == 'whole':
+        elif self.eval_method == 'whole':
             self.best_scores_ = scoring_func(y, self.cv_pred_, noise_ceiling)
 
         # Final full-data fit
@@ -270,6 +274,58 @@ class Encoder:
         self.model_.fit(X, y)
         self.coef_ = getattr(self.model_, 'coef_', None)
         self.intercept_ = getattr(self.model_, 'intercept_', None)
+    
+    # Nested CV, confirming no data leaking
+    def fit_nested_cv(self, X: np.ndarray, y: np.ndarray, noise_ceiling=None):
+        # Optional PCA
+        if self.pca_components is not None:
+            self.pca_ = PCA(n_components=self.pca_components, random_state=self.random_state)
+            X = self.pca_.fit_transform(X)
+            self.pca_components_ = self.pca_.components_
+
+        # Get scoring functions
+        scoring_func = _pearson_r if self.scoring == 'pearson' else _explained_variance
+        cv_scoring = self._get_cv_scoring()
+
+        outer_splits, inner_splits = self.cv_splits, self.cv_splits
+        n_samples = X.shape[0]
+        pred_y = np.zeros_like(y, dtype=float)
+
+        outer_cv = KFold(n_splits=outer_splits, shuffle=True, random_state=self.random_state)
+        for train_idx, test_idx in outer_cv.split(X):
+            X_train, X_test = X[train_idx], X[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
+
+            inner_cv = KFold(n_splits=inner_splits, shuffle=True, random_state=self.random_state)
+            # Hyperparameter selection
+            if self.eval_method == 'whole':
+                best_est, _, score = self._hyperparam_selection_whole_dataset(
+                    X_train, y_train, noise_ceiling
+                )
+            elif self.eval_method == 'cv':
+                if self.method == 'PLS':
+                    search = GridSearchCV(
+                        PLSRegression(max_iter=self.max_iter),
+                        {'n_components': self.components},
+                        cv=inner_cv,
+                        scoring=cv_scoring,
+                        n_jobs=self.n_jobs
+                    )
+                else:
+                    search = GridSearchCV(
+                        Ridge(),
+                        {'alpha': self.alphas},
+                        cv=inner_cv,
+                        scoring=cv_scoring,
+                        n_jobs=self.n_jobs
+                    )
+                search.fit(X_train, y_train)
+                best_est = search.best_estimator_
+            best_est.fit(X_train, y_train)
+            pred_y[test_idx] = best_est.predict(X_test)
+        
+        pred_score = scoring_func(y, pred_y, noise_ceiling)
+        return pred_y, pred_score
 
     def _fit_ridge_per_target(
         self, X: np.ndarray, y: np.ndarray, noise_ceiling=None
@@ -278,14 +334,14 @@ class Encoder:
         
         for alpha in self.alphas:
             model = Ridge(alpha=alpha)
-            if self.search_mode == 'whole':
+            if self.eval_method == 'whole':
                 preds = cross_val_predict(
                     model, X, y, cv=self.cv, n_jobs=self.n_jobs
                 )
                 scores = (_pearson_r if self.scoring == 'pearson' else _explained_variance)(
                     y, preds, noise_ceiling
                 )
-            elif self.search_mode == 'cv':
+            elif self.eval_method == 'cv':
                 scores = self._evaluate_with_cv_average(model, X, y, noise_ceiling)
             scores = np.atleast_1d(scores)
             if best_scores is None:
@@ -313,14 +369,14 @@ class Encoder:
         best_scores, best_comps = None, None
         for comp in self.components:
             model = PLSRegression(n_components=comp, max_iter=self.max_iter)
-            if self.search_mode == 'whole':
+            if self.eval_method == 'whole':
                 preds = cross_val_predict(
                     model, X, y, cv=self.cv, n_jobs=self.n_jobs
                 )
                 scores = (_pearson_r if self.scoring == 'pearson' else _explained_variance)(
                     y, preds, noise_ceiling
                 )
-            elif self.search_mode == 'cv':
+            elif self.eval_method == 'cv':
                 scores = self._evaluate_with_cv_average(model, X, y, noise_ceiling)
             scores = np.atleast_1d(scores)
             if best_scores is None:
@@ -362,7 +418,6 @@ class Encoder:
             'best_params': self.best_params_,
             'best_per_target': self.best_per_target_,
             'best_scores': self.best_scores_,
-            'cv_score': self.cv_score_,
             'scoring': self.scoring,
             'method': self.method
         }
