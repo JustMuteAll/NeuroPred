@@ -122,7 +122,7 @@ for layer in layers_to_test:
         feats_np = feats_all.numpy()
 
     enc = Encoder(method='Ridge', cv_splits=cv_folds, pca_components=pca_comps)
-    cv_mode = 'nested' # 'simple' or 'nested'
+    cv_mode = 'simple' # 'simple' or 'nested'
     if cv_mode == 'simple':
         enc.fit(feats_np, y, nc)
         score = np.mean(enc.best_scores_)
