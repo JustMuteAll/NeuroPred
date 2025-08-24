@@ -40,7 +40,7 @@ class FeatureExtractorBase(nn.Module):
             if name not in modules:
                 raise ValueError(f"Module '{name}' not found in model")
             def hook_fn(module, _inp, outp, key=name):
-                self._features[key] = outp
+                self._features[key] = outp.clone()
             self._hooks.append(modules[name].register_forward_hook(hook_fn))
 
     def _clear_hooks(self) -> None:
