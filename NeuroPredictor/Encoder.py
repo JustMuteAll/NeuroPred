@@ -6,7 +6,6 @@ from sklearn.decomposition import PCA
 from sklearn.multioutput import MultiOutputRegressor
 from typing import Optional, Union
 import warnings
-
 import test
 
 
@@ -26,23 +25,31 @@ def _prepare_noise_ceiling(
         return nc
     raise ValueError(f"noise_ceiling shape {nc.shape} does not match r shape {r.shape}")
 
-
-def _pearson_r(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    noise_ceiling: Optional[Union[float, np.ndarray]] = None
-) -> Union[float, np.ndarray]:
+def _pearson_r(y_true, y_pred, noise_ceiling=None, return_nan_if_const=False, eps=1e-12):
     if y_true.shape != y_pred.shape:
         raise ValueError("Shapes must match")
     if y_true.ndim == 1:
+        # 1D 情况下直接调用 np.corrcoef 可能仍遇到常数列→NaN，这里保持原样
         r = np.corrcoef(y_true, y_pred)[0, 1]
     else:
-        yt = y_true - y_true.mean(axis=0)
-        yp = y_pred - y_pred.mean(axis=0)
-        r = (yt * yp).sum(axis=0) / (np.linalg.norm(yt, axis=0) * np.linalg.norm(yp, axis=0))
-    nc = _prepare_noise_ceiling(noise_ceiling, r)
-    return r / nc if nc is not None else r
+        yt = y_true - np.nanmean(y_true, axis=0, keepdims=True)
+        yp = y_pred - np.nanmean(y_pred, axis=0, keepdims=True)
 
+        num = np.nansum(yt * yp, axis=0)
+        den = np.sqrt(np.nansum(yt**2, axis=0) * np.nansum(yp**2, axis=0))
+
+        # 分母安全化
+        if return_nan_if_const:
+            r = np.divide(num, den, out=np.full_like(den, np.nan, dtype=float), where=den > eps)
+        else:
+            r = np.divide(num, den, out=np.zeros_like(den, dtype=float), where=den > eps)
+
+    nc = _prepare_noise_ceiling(noise_ceiling, r)
+    if nc is not None:
+        # 噪声上限也做安全除法
+        nc_safe = np.where(np.abs(nc) > eps, nc, np.nan if return_nan_if_const else 1.0)
+        r = r / nc_safe
+    return r
 
 def _explained_variance(
     y_true: np.ndarray,
@@ -137,7 +144,7 @@ class Encoder:
         cv = self.cv
         best_score = -np.inf
         best_params = None
-        best_param_value = None  # hold the best hyperparameter value
+        best_param_value = 0  # hold the best hyperparameter value
         
         if self.method == 'PLS':
             print(f"Testing {len(self.components)} PLS components (evaluate with CV)...")

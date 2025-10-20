@@ -113,7 +113,6 @@ class FeatureExtractorBase(nn.Module):
 
         return feature_shapes
 
-
     def forward(self, x: torch.Tensor, module_names: Union[str, List[str]]):
         return self._extract_features(x, module_names)
 
