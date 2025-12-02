@@ -1,6 +1,8 @@
+import os
 import torch
 import torch.nn as nn
 from torch.cuda.amp import autocast
+from torchvision import transforms
 from typing import Union, List
 
 class FeatureExtractorBase(nn.Module):
@@ -276,3 +278,72 @@ class OpenCLIPFeatureExtractor(FeatureExtractorBase):
         self.model = model.visual.to(self.device).eval()
         for p in self.model.parameters(): p.requires_grad = False
         self.preprocess = preprocess
+
+def replace_module_prefix(state_dict, prefix: str, replace_with: str = ""):
+    state_dict = {
+        (
+            key.replace(prefix, replace_with, 1) if key.startswith(prefix) else key
+        ): val
+        for (key, val) in state_dict.items()
+    }
+    return state_dict
+
+class SSLFeatureExtractor(FeatureExtractorBase):
+    def __init__(self, model_name: str, device: str = 'cuda', amp=True, weights_dir=''):
+        self.weights_dict = {
+         'simclr_rn50': 'simclr_rn50.torch',
+         'pirl_rn50': 'pirl_rn50.torch',
+         'moco_rn50': 'moco_rn50.torch',
+         'swav_rn50': 'swav_rn50.torch',
+         'vicreg_rn50': 'vicreg_rn50.pth',
+         'dino_rn50': 'dino_rn50.pth',
+         'simclr_vit_small': 'simclr_vit_small.pt',
+         'simclr_vit_base': 'simclr_vit_base.pt',
+         'simclr_vit_large': 'simclr_vit_large.pt',
+         'dino_vit_small': 'dino_vit_small.pth',
+         'dino_vit_base': 'dino_vit_base.pth',
+         'dino_vit_large': 'dino_vit_large.pth',
+         '': ''
+        }
+        super().__init__(device, amp=amp)
+        model_weight_path = os.path.join(weights_dir, self.weights_dict[model_name])
+        if model_name in ['simclr_rn50', 'pirl_rn50', 'moco_rn50', 'swav_rn50']:
+            state_dict = torch.load(model_weight_path, map_location=device)['classy_state_dict']['base_model']['model']['trunk']
+            state_dict = replace_module_prefix(state_dict, "_feature_blocks.")
+            dummy_model = tv_models.resnet50(weights=None).to(device)
+            
+        elif model_name in ['vicreg_rn50', 'dino_rn50']:
+            state_dict = torch.load(model_weight_path, map_location=device)
+            dummy_model = tv_models.resnet50(weights=None).to(device)
+        
+        elif 'vit' in model_name:
+            if 'simclr' in model_name:
+                state_dict = torch.load(model_weight_path, map_location=device, weights_only=False)['state_dict']
+                state_dict = replace_module_prefix(state_dict, "module.visual.")
+                if 'small' in model_name:
+                    dummy_model = timm.create_model('vit_small_patch16_224', pretrained=False).to(device)
+                elif 'base' in model_name:
+                    dummy_model = timm.create_model('vit_base_patch16_224', pretrained=False).to(device)
+                elif 'large' in model_name:
+                    dummy_model = timm.create_model('vit_large_patch16_224', pretrained=False).to(device)
+            elif 'dino' in model_name:
+                if 'small' in model_name:
+                    dummy_model = timm.create_model('vit_small_patch14_reg4_dinov2', pretrained=True).to(device)
+                elif 'base' in model_name:
+                    dummy_model = timm.create_model('vit_base_patch14_reg4_dinov2', pretrained=True).to(device)
+                elif 'large' in model_name:
+                    dummy_model = timm.create_model('vit_large_patch14_reg4_dinov2', pretrained=True).to(device)
+                self.model = dummy_model
+                self.preprocess = transforms.Compose([
+                transforms.Resize((518, 518)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.48145466, 0.4578275, 0.40821073],
+                    std=[0.26862954, 0.26130258, 0.27577711]
+                    )
+                ])
+                return
+        else:
+            return
+        dummy_model.load_state_dict(state_dict, strict=False)
+        self.model = dummy_model

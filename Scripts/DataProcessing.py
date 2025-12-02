@@ -55,11 +55,11 @@ def compute_noise_ceiling(resp_mat, stim_idx, n_splits=100):
     corrected_noise_ceiling = (2*noise_ceiling)/(1+noise_ceiling)
     return corrected_noise_ceiling
 
-def Load_data_from_GoodUnit(filedir, save_path=None, start_time=60, end_time=220):
+def Load_data_from_GoodUnit(file_dir, save_path=None, start_time=60, end_time=220):
     if file_dir.endswith('.mat'):
         file_list = [file_dir]
     else:
-        file_list = [os.path.join(filedir, i) for i in os.listdir(filedir) if i.endswith('.mat')]
+        file_list = [os.path.join(file_dir, i) for i in os.listdir(file_dir) if i.endswith('.mat')]
     resp_total, nc_total = np.array([]), np.array([])
     for file_path in file_list:
         with h5py.File(file_path, 'r') as f:
@@ -95,5 +95,5 @@ def Load_data_from_GoodUnit(filedir, save_path=None, start_time=60, end_time=220
 
 file_dir = r"D:\Dataset\AxisData_EVC" # One .mat file or the path of data folder
 save_path = r"D:\Analysis\NSD_Alignment\Data\AxisData.npz"
-merged_data = Load_data_from_GoodUnit(filedir=file_dir, save_path=save_path)
+merged_data = Load_data_from_GoodUnit(file_dir=file_dir, save_path=save_path)
 print(merged_data['data'].shape, merged_data['nc'].shape)

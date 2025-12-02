@@ -21,9 +21,9 @@ from tqdm import tqdm
 from NeuroPredictor.Utils import ImageFolderDataset, get_extractor, ensure_batch_first
 
 # Model params
-backbone_type = 'torchvision'  # 'timm', 'torchvision', 'clip', or 'open_clip'
-model_name = 'resnet50'
-ckpt_path = r"D:\Dataset\ss_weights\resnet50\r50_2x_sk1.pth"
+backbone_type = 'ssl'  # 'timm', 'torchvision', 'clip', 'open_clip' or 'ssl'
+model_name = 'simclr_rn50'
+ckpt_path = r"D:\Dataset\ssl_weights" # or None
 batch_size = 64
 layer_to_test = 'layer4.1.relu'
 use_amp = True
@@ -46,7 +46,7 @@ default_preprocess = transforms.Compose([
         ])
 # ---- Main processing ----
 # Initialize feature extractor
-extractor = get_extractor(backbone_type, model_name, device, use_amp)
+extractor = get_extractor(backbone_type, model_name, device, use_amp, ckpt_path=ckpt_path)
 preprocess = extractor.get_preprocess() or default_preprocess
 
 # Prepare image dataset and loader
@@ -80,6 +80,8 @@ elif save_fmt == '.mat':
     savemat(save_path, {'feat': feats_np})
 else:
     raise ValueError("fmt 仅支持 'npy' 或 'mat'")
+
+print("Saving done.")
 
 
 

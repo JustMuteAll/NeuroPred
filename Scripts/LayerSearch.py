@@ -20,14 +20,14 @@ from tqdm import tqdm
 from NeuroPredictor.Utils import ImageFolderDataset, get_extractor, ensure_batch_first
 
 # Model params
-backbone_type = 'clip'  # 'timm', 'torchvision', 'clip', or 'open_clip'
-model_name = 'ViT-B/16'
+backbone_type = 'ssl'  # 'timm', 'torchvision', 'clip', 'open_clip' or 'ssl'
+model_name = 'simclr_rn50'
 # ckpt_path = r"D:\Dataset\robust_weights\resnet50\resnet50_l2_eps0.ckpt"
-ckpt_path = None
+ckpt_path = r"D:\Dataset\ssl_weights"
 batch_size = 64
 # vit_layer = 17
 # layers_to_test = [f'blocks.{vit_layer}.norm1', f'blocks.{vit_layer}.attn.qkv', f'blocks.{vit_layer}.attn.q_norm', f'blocks.{vit_layer}.attn.k_norm', f'blocks.{vit_layer}.attn.proj', f'blocks.{vit_layer}.ls1', f'blocks.{vit_layer}.norm2', f'blocks.{vit_layer}.mlp.fc1', f'blocks.{vit_layer}.mlp.act', f'blocks.{vit_layer}.mlp.norm', f'blocks.{vit_layer}.mlp.fc2', f'blocks.{vit_layer}.ls2']
-layers_to_test = ['transformer.resblocks.6.ln_1', 'transformer.resblocks.6.mlp.c_fc', 'transformer.resblocks.6.mlp.gelu',  'transformer.resblocks.7.ln_1', 'transformer.resblocks.7.mlp.c_fc', 'transformer.resblocks.7.mlp.gelu', 'transformer.resblocks.7.mlp.c_proj', 'transformer.resblocks.7.ln_2', 'transformer.resblocks.8.ln_1', 'transformer.resblocks.8.mlp.c_fc', 'transformer.resblocks.8.mlp.gelu', 'transformer.resblocks.8.mlp.c_proj', 'transformer.resblocks.8.ln_2']
+layers_to_test = ['layer2.1.relu', 'layer3.1.relu', 'layer4.1.relu']
 use_amp = True
 device = 'cuda'
 
@@ -64,7 +64,7 @@ n_units = nc.shape[0]
 print(y.shape, nc.shape)
 
 # Initialize feature extractor
-extractor = get_extractor(backbone_type, model_name, device, use_amp)
+extractor = get_extractor(backbone_type, model_name, device, use_amp, ckpt_path=ckpt_path)
 preprocess = extractor.get_preprocess() or default_preprocess
 
 # Prepare image dataset and loader

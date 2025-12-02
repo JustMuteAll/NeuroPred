@@ -11,7 +11,8 @@ from NeuroPredictor.FeatExtractor import (
     TimmFeatureExtractor,
     TorchvisionFeatureExtractor,
     CLIPFeatureExtractor,
-    OpenCLIPFeatureExtractor
+    OpenCLIPFeatureExtractor,
+    SSLFeatureExtractor
 )
 
 class ImageFolderDataset(Dataset):
@@ -36,12 +37,14 @@ def get_extractor(backbone_type, model_name, device, amp, ckpt_path):
     backbone_type = backbone_type.lower()
     if backbone_type == 'timm':
         return TimmFeatureExtractor(model_name, pretrained=True, device=device, amp=amp)
-    if backbone_type == 'torchvision':
+    elif backbone_type == 'torchvision':
         return TorchvisionFeatureExtractor(model_name, ckpt_path=ckpt_path, device=device, amp=amp)
-    if backbone_type == 'clip':
+    elif backbone_type == 'clip':
         return CLIPFeatureExtractor(model_name, device=device, amp=amp)
-    if backbone_type == 'open_clip':
+    elif backbone_type == 'open_clip':
         return OpenCLIPFeatureExtractor(model_name, pretrained=True, device=device)
+    elif backbone_type == 'ssl':
+        return SSLFeatureExtractor(model_name, device=device, amp=amp, weights_dir=ckpt_path)
     raise ValueError(f"Unknown network type {backbone_type}")
 
 def ensure_batch_first(feats, batch_size=None, seq_len_expected=None):
